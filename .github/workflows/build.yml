@@ -86,8 +86,12 @@ jobs:
           if "$INS" bare_elf.bin >/dev/null 2>&1; then
             echo "FAIL: 裸 ELF 不应 GOOD"; exit 1
           fi
-          "$INS" --json bare_elf.bin | grep -q '"format": "BARE_ELF"' || {
-            echo "FAIL: 裸 ELF 格式识别错"; exit 1; }
+          # --json 对错误格式会返回 1（表示格式错误），这里只取输出
+          fmt=$("$INS" --json bare_elf.bin || true)
+          case "$fmt" in
+            *'"format": "BARE_ELF"'*) ;;
+            *) echo "FAIL: 裸 ELF 格式识别错"; exit 1 ;;
+          esac
           echo "PASS: 裸 ELF -> BAD_FORMAT"
 
           # 3. 日期 + ELF -> DATE+ELF
@@ -100,14 +104,20 @@ jobs:
           if "$INS" date_elf.bin >/dev/null 2>&1; then
             echo "FAIL: 日期+ELF 不应 GOOD"; exit 1
           fi
-          "$INS" --json date_elf.bin | grep -q '"format": "DATE+ELF"' || {
-            echo "FAIL: 日期+ELF 识别错"; exit 1; }
+          fmt=$("$INS" --json date_elf.bin || true)
+          case "$fmt" in
+            *'"format": "DATE+ELF"'*) ;;
+            *) echo "FAIL: 日期+ELF 识别错"; exit 1 ;;
+          esac
           echo "PASS: 日期+ELF -> BAD_FORMAT"
 
           # 4. beef 头
           printf '\xbe\xef0000rest' > beef.bin
-          "$INS" --json beef.bin | grep -q '"format": "BEEF"' || {
-            echo "FAIL: beef 识别错"; exit 1; }
+          fmt=$("$INS" --json beef.bin || true)
+          case "$fmt" in
+            *'"format": "BEEF"'*) ;;
+            *) echo "FAIL: beef 识别错"; exit 1 ;;
+          esac
           echo "PASS: beef -> BAD_FORMAT"
 
           # 5. 不存在的文件 -> exit 2
@@ -119,10 +129,15 @@ jobs:
           echo "PASS: 不存在 -> exit 2"
 
           # 6. 正确固件的关键字段
-          "$INS" --json correct.dl | grep -q '"format": "ACL/PJL"' || {
-            echo "FAIL: ACL/PJL 识别错"; exit 1; }
-          "$INS" --json correct.dl | grep -q '"verdict": "GOOD"' || {
-            echo "FAIL: verdict 错"; exit 1; }
+          fmt=$("$INS" --json correct.dl || true)
+          case "$fmt" in
+            *'"format": "ACL/PJL"'*) ;;
+            *) echo "FAIL: ACL/PJL 识别错"; exit 1 ;;
+          esac
+          case "$fmt" in
+            *'"verdict": "GOOD"'*) ;;
+            *) echo "FAIL: verdict 错"; exit 1 ;;
+          esac
           echo "PASS: ACL/PJL + GOOD"
 
           echo
