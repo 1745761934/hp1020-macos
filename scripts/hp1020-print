@@ -12,6 +12,7 @@
 #   hp1020-print --firmware            只推固件
 #   hp1020-print --pages 文件.pdf      列出各页是否有内容
 #   hp1020-print --check               检查依赖是否齐全
+#   hp1020-print --inspect             检查固件文件格式
 
 set -uo pipefail
 
@@ -69,6 +70,20 @@ ensure_firmware() {
     fi
     echo "==> 固件未加载，正在推送（约 10 秒）"
     [ -f "$FW" ] || die "缺少固件 $FW"
+
+    # 格式自检：md5 正确但格式错误的情况不会发生在本仓库，
+    # 但用户可能替换了 fw/ 下的文件。先验格式再推，避免把打印机
+    # 的 USB 控制器打进异常态（错误格式会导致设备从总线上消失）。
+    INSPECT="$DIR/scripts/hp1020-fwinspect"
+    if [ -x "$INSPECT" ]; then
+        if ! "$INSPECT" "$FW" >/dev/null 2>&1; then
+            echo "  固件格式检查未通过:" >&2
+            "$INSPECT" "$FW" 2>&1 | sed 's/^/    /' >&2
+            die "拒绝推送格式错误的固件（会把打印机的 USB 控制器搞坏）"
+        fi
+        echo "  格式检查通过"
+    fi
+
     actual=$(md5 -q "$FW" 2>/dev/null)
     [ "$actual" = "$FW_MD5" ] || die "固件校验失败 md5=$actual，应为 $FW_MD5"
     "$USB" "$FW" >/dev/null 2>&1 || die "固件推送失败"
@@ -102,6 +117,10 @@ case "${1:-}" in
         exit 0 ;;
     --firmware) ensure_firmware; exit 0 ;;
     --check)    echo "依赖检查:"; check_deps; exit $? ;;
+    --inspect)
+        INSPECT="$DIR/scripts/hp1020-fwinspect"
+        [ -x "$INSPECT" ] || die "缺少 $INSPECT"
+        "$INSPECT" "${2:-$FW}"; exit $? ;;
     --pages)
         [ -f "${2:-}" ] || die "用法: $0 --pages 文件.pdf"
         cp=$(content_pages "$2")

@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""
+hp1020-fwinspect — 识别 HP LaserJet 1020 固件文件的真实格式
+
+这个工具存在的理由：固件文件"看起来能用"和"真的能用"是两件事。
+把裸 ELF 推给打印机，它会接受字节、返回成功、甚至回显版本号，
+但固件永远不会执行。仅凭文件大小或扩展名完全无法分辨。
+
+用法:
+    ./hp1020-fwinspect                检查默认位置 fw/sihp1020.dl
+    ./hp1020-fwinspect 文件           检查指定文件
+    ./hp1020-fwinspect --all DIR      扫描目录下所有候选固件
+    ./hp1020-fwinspect --json 文件    机器可读输出
+
+退出码: 0 正确 / 1 错误格式 / 2 文件不存在
+"""
+
+import sys
+import os
+import json
+import hashlib
+import struct
+from typing import Dict, List, Optional, Tuple
+
+# 已验证的正确固件
+KNOWN_GOOD = {
+    "0cd1ac3a4f6cb7995e99deffff840927": {
+        "size": 128999,
+        "fwver": "20080222",
+        "verdict": "GOOD",
+        "note": "已验证的正确固件",
+    },
+}
+
+# 已知的错误变体
+KNOWN_BAD = {
+    "dea9e8156e2b601f3750e8a7ed23677e": {
+        "size": 128431,
+        "fwver": "20050309",
+        "verdict": "BAD_VERSION",
+        "note": "版本过旧，版本号能回显但成像失败，出白纸",
+    },
+    "86403c3b9c64eae8aeb0e68abf5cb5ff": {
+        "size": 126151,
+        "fwver": "20041129",
+        "verdict": "BAD_VERSION",
+        "note": "更旧的版本，同样出白纸",
+    },
+    "92ad60ed96583f868736de7bd3c2c157": {
+        "size": 128380,
+        "fwver": None,
+        "verdict": "BAD_FORMAT",
+        "note": ("Apple 包内的 hp1020.acl：日期串直接接 ELF，没有 PJL 封装头。"
+                 "这是 rasterToHPZJS 内部用的中间格式，不是可直接发送的线格式。"
+                 "推给打印机会被接受但不执行"),
+    },
+}
+
+# 魔数
+MAGIC_ELF = b"\x7fELF"
+MAGIC_BEEF = b"\xbe\xef"
+MAGIC_PJL = b"\x1b%-12345X"
+PJL_ACL = b"@PJL ENTER LANGUAGE=ACL"
+PJL_ENTER = b"@PJL ENTER LANGUAGE="
+
+
+def sniff_format(blob: bytes) -> str:
+    """判断数据流的封装格式。
+
+    判定顺序很重要：HP 原始镜像和 hp1020.acl 都以日期数字开头，
+    但前者后面跟的是原始固件体，后者后面直接跟 ELF。
+    """
+    if blob.startswith(MAGIC_PJL):
+        if PJL_ACL in blob[:128]:
+            return "ACL/PJL"
+        if PJL_ENTER in blob[:128]:
+            lang = blob[:128].split(PJL_ENTER, 1)[1].split(b"\r")[0].split(b"\n")[0]
+            return "PJL/" + lang.decode("ascii", "replace").strip()
+        return "PJL(unknown)"
+
+    if blob.startswith(MAGIC_ELF):
+        return "BARE_ELF"
+
+    if blob.startswith(MAGIC_BEEF):
+        return "BEEF"
+
+    # 日期数字开头：区分"日期+ELF"（Apple 的 .acl）和"日期+原始固件体"
+    if blob[:8].isdigit() and blob[:4].isdigit():
+        if blob[8:12] == MAGIC_ELF:
+            return "DATE+ELF"
+        return "HP_RAW_IMAGE"
+
+    if blob[:4] == b"\x00\xac\xc0\xde" or blob[:2] == b"\x00\xac":
+        return "ARM2HPDL_WRAPPED"
+
+    return "UNKNOWN"
+
+
+def find_fwver(blob: bytes) -> Optional[str]:
+    """提取固件版本号。
+
+    固件里有两种可能的版本标记：
+
+      1. 设备 ID 里的 ';FWVER:20080222;'（这是打印机回报的，文件里没有）
+      2. 封装头里的日期串，如 '20080822'（arm2hpdl 写入的构建日期）
+
+    对 fw/sihp1020.dl 来说，头里是 20080822，而设备回报 FWVER:20080222。
+    两者接近但不等，所以这里分开报告，不做等价假设。
+    """
+    # 优先找显式的 FWVER: 标记
+    idx = blob.find(b"FWVER:")
+    if idx >= 0:
+        tail = blob[idx + 6: idx + 22]
+        out = bytearray()
+        for ch in tail:
+            if 0x30 <= ch <= 0x39:
+                out.append(ch)
+            else:
+                break
+        if out:
+            return out.decode("ascii")
+
+    # 回退：在头部窗口里找 8 位日期串
+    window = blob[:128]
+    i = 0
+    while i + 8 <= len(window):
+        chunk = window[i:i + 8]
+        if chunk.isdigit():
+            year = int(chunk[:4])
+            if 1990 <= year <= 2100:
+                return chunk.decode("ascii")
+        i += 1
+    return None
+
+
+def describe_elf(blob: bytes) -> Optional[Dict]:
+    """解析 ACL 封装内的 ELF 头。
+
+    注意：字节序由 ELF 头偏移 5 的 EI_DATA 决定（1=小端, 2=大端），
+    不能假设。1020 的固件是大端的 ARM ELF，按小端读会把
+    e_machine 读成垃圾值。
+    """
+    off = 0
+    if not blob.startswith(MAGIC_ELF):
+        window = blob[:256]
+        pos = window.find(MAGIC_ELF)
+        if pos < 0:
+            return None
+        off = pos
+    if off + 20 > len(blob):
+        return None
+
+    ei_class = blob[off + 4]
+    ei_data = blob[off + 5]
+    if ei_class not in (1, 2) or ei_data not in (1, 2):
+        return None
+
+    endian = "<" if ei_data == 1 else ">"
+    e_type = struct.unpack_from(endian + "H", blob, off + 16)[0]
+    e_machine = struct.unpack_from(endian + "H", blob, off + 18)[0]
+
+    # 0xabc7 是 HP 私有机器码（ARM 核心，非标准 EM_ARM/0x28）
+    machines = {
+        0x28: "ARM", 0x3E: "x86-64", 0xB7: "AArch64",
+        0x03: "x86", 0x08: "MIPS", 0x14: "PowerPC",
+        0xABC7: "ARM(HP custom)",
+    }
+    types = {1: "REL", 2: "EXEC", 3: "DYN", 4: "CORE"}
+
+    return {
+        "offset": off,
+        "class": "ELF32" if ei_class == 1 else "ELF64",
+        "endian": "LE" if ei_data == 1 else "BE",
+        "machine": machines.get(e_machine, "0x%x" % e_machine),
+        "type": types.get(e_type, str(e_type)),
+        "plausible": e_type in (1, 2, 3, 4) and e_machine in machines,
+    }
+
+
+def verdict_for(fmt: str, md5: str, size: int) -> Tuple[str, str]:
+    """给出判定和处理建议"""
+    if md5 in KNOWN_GOOD:
+        return "GOOD", KNOWN_GOOD[md5]["note"]
+    if md5 in KNOWN_BAD:
+        e = KNOWN_BAD[md5]
+        return e["verdict"], e["note"]
+
+    if fmt == "ACL/PJL":
+        return "SUSPECT", "格式正确但校验值未知，可能是其他版本，建议换用已知正确的固件"
+    if fmt == "BARE_ELF":
+        return "BAD_FORMAT", ("裸 ELF，缺少 @PJL ENTER LANGUAGE=ACL 封装头。"
+                              "推给打印机只会被接受但不执行。不要直接使用")
+    if fmt == "DATE+ELF":
+        return "BAD_FORMAT", ("日期串 + 裸 ELF，缺少 @PJL ENTER LANGUAGE=ACL 封装头。"
+                              "这是 HP 内部中间格式，不是可发送的线格式")
+    if fmt == "BEEF":
+        return "BAD_FORMAT", ("ARM2HPDL 的 beef 封装头，LJ 1020 不接受。"
+                              "通常是把裸 ELF 喂给 arm2hpdl 的产物")
+    if fmt == "HP_RAW_IMAGE":
+        return "NEEDS_CONVERT", ("HP 原始镜像，需要经 arm2hpdl 转换才能得到"
+                                 "正确的 ACL/PJL 封装（这是唯一正确的转换路径）")
+    if fmt == "ARM2HPDL_WRAPPED":
+        return "BAD_FORMAT", "arm2hpdl 的中间封装，不是可直接发送的格式"
+    return "UNKNOWN", "无法识别的格式"
+
+
+def inspect(path: str) -> Dict:
+    try:
+        with open(path, "rb") as f:
+            blob = f.read()
+    except OSError as e:
+        return {"path": path, "error": str(e)}
+
+    md5 = hashlib.md5(blob).hexdigest()
+    fmt = sniff_format(blob)
+    fwver = find_fwver(blob)
+    verdict, note = verdict_for(fmt, md5, len(blob))
+    elf = describe_elf(blob) if fmt in ("ACL/PJL", "BARE_ELF") else None
+
+    result = {
+        "path": path,
+        "size": len(blob),
+        "md5": md5,
+        "format": fmt,
+        "fwver": fwver,
+        "verdict": verdict,
+        "note": note,
+        "head": blob[:16].hex(),
+    }
+    if elf:
+        result["elf"] = elf
+    return result
+
+
+def print_human(r: Dict) -> None:
+    if "error" in r:
+        print(f"  文件: {r['path']}")
+        print(f"  错误: {r['error']}")
+        return
+
+    icon = {
+        "GOOD": "✓",
+        "BAD_FORMAT": "✗",
+        "BAD_VERSION": "✗",
+        "NEEDS_CONVERT": "→",
+        "SUSPECT": "?",
+        "UNKNOWN": "?",
+    }.get(r["verdict"], "?")
+
+    print(f"  文件:   {r['path']}")
+    print(f"  大小:   {r['size']} 字节")
+    print(f"  md5:    {r['md5']}")
+    print(f"  格式:   {r['format']}")
+    print(f"  开头:   {r['head']}")
+    print(f"  FWVER:  {r['fwver'] or '（未找到）'}")
+    if "elf" in r:
+        e = r["elf"]
+        print(f"  ELF:    {e['class']} {e['endian']} {e['machine']} {e['type']} "
+              f"@ offset {e['offset']}")
+    print(f"  判定:   {icon} {r['verdict']}")
+    print(f"  说明:   {r['note']}")
+
+    if r["verdict"] == "GOOD":
+        print()
+        print("  这个固件可以正常使用。加载后打印机应回报 FWVER:20080222。")
+    elif r["verdict"] == "BAD_FORMAT":
+        print()
+        print("  警告：这个文件推送后，打印机会接受字节并返回成功，")
+        print("        但固件不会执行 —— 表现为完全不出纸、机器不响。")
+        print("  请改用 fw/sihp1020.dl（md5 0cd1ac3a4f6cb7995e99deffff840927）。")
+    elif r["verdict"] == "BAD_VERSION":
+        print()
+        print("  警告：版本过旧。打印机回显版本号，但渲染失败，出白纸。")
+        print("  请改用 fw/sihp1020.dl（FWVER 20080222）。")
+    elif r["verdict"] == "NEEDS_CONVERT":
+        print()
+        print("  这是正确的中间格式。转换方式：")
+        print(f"      arm2hpdl {os.path.basename(r['path'])} > sihp1020.dl")
+        print("  注意：只对 HP 原始镜像这么做。对裸 ELF 转换会得到不可用的 beef 格式。")
+
+
+def main(argv: List[str]) -> int:
+    as_json = "--json" in argv
+    argv = [a for a in argv if a != "--json"]
+
+    scan_all = "--all" in argv
+    argv = [a for a in argv if a != "--help" and a != "-h"]
+
+    if scan_all:
+        argv.remove("--all")
+        target = argv[1] if len(argv) > 1 else "."
+        if not os.path.isdir(target):
+            print(f"不是目录: {target}", file=sys.stderr)
+            return 2
+        cands = []
+        for root, _, files in os.walk(target):
+            for fn in files:
+                low = fn.lower()
+                if any(k in low for k in (".dl", ".acl", ".img", ".fw", ".bin")):
+                    cands.append(os.path.join(root, fn))
+        if not cands:
+            print(f"在 {target} 下没找到固件候选文件")
+            return 1
+        results = [inspect(p) for p in sorted(cands)]
+        if as_json:
+            print(json.dumps(results, indent=2, ensure_ascii=False))
+        else:
+            print(f"扫描 {len(results)} 个文件\n")
+            for i, r in enumerate(results):
+                if i:
+                    print("  " + "-" * 58)
+                print_human(r)
+        return 0 if any(r.get("verdict") == "GOOD" for r in results) else 1
+
+    if len(argv) < 2:
+        # 无参数：检查仓库内的默认固件
+        here = os.path.dirname(os.path.abspath(__file__))
+        default = os.path.normpath(os.path.join(here, "..", "fw", "sihp1020.dl"))
+        if not os.path.exists(default):
+            print(__doc__.strip())
+            return 2
+        argv = [argv[0], default]
+
+    if argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+
+    path = argv[1]
+    if not os.path.exists(path):
+        print(f"文件不存在: {path}", file=sys.stderr)
+        return 2
+
+    r = inspect(path)
+    if as_json:
+        print(json.dumps(r, indent=2, ensure_ascii=False))
+    else:
+        print_human(r)
+
+    return 0 if r.get("verdict") == "GOOD" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

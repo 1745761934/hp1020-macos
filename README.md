@@ -98,6 +98,52 @@ head -c 24 fw/sihp1020.dl | xxd
 - 或用 `foo2zjs` 的 `getweb` 下载 HP 原始镜像，再 `arm2hpdl` 转换
 - **不要手工把裸 ELF 包一层**
 
+### 用工具检查固件格式
+
+不用肉眼判断，仓库自带检测器：
+
+```bash
+./scripts/hp1020-fwinspect fw/sihp1020.dl
+```
+
+```
+  文件:   fw/sihp1020.dl
+  大小:   128999 字节
+  md5:    0cd1ac3a4f6cb7995e99deffff840927
+  格式:   ACL/PJL
+  开头:   1b252d31323334355840504a4c20454e
+  FWVER:  20080822
+  ELF:    ELF32 BE ARM(HP custom) EXEC @ offset 50
+  判定:   ✓ GOOD
+```
+
+扫描一个目录下所有候选固件：
+
+```bash
+./scripts/hp1020-fwinspect --all ~/Downloads
+```
+
+机器可读输出（脚本集成用）：
+
+```bash
+./scripts/hp1020-fwinspect --json fw/sihp1020.dl
+```
+
+退出码：`0` 正确 / `1` 错误格式 / `2` 文件不存在。
+
+能识别的格式：
+
+| 格式标记 | 含义 | 可用 |
+|---|---|---|
+| `ACL/PJL` | 带 `@PJL ENTER LANGUAGE=ACL` 封装 | 视版本而定 |
+| `BARE_ELF` | 裸 ELF，无封装 | ✗ |
+| `DATE+ELF` | 日期串直接接 ELF（Apple 的 `.acl`） | ✗ |
+| `BEEF` | `arm2hpdl` 的 beef 头 | ✗ |
+| `HP_RAW_IMAGE` | HP 原始镜像，需 `arm2hpdl` 转换 | → |
+| `ARM2HPDL_WRAPPED` | `arm2hpdl` 中间封装 | ✗ |
+
+`hp1020-print` 在推送固件前会自动跑这个检查。**格式不对就拒绝推送** —— 因为推错格式会把打印机的 USB 控制器打进异常态，需要拔电源才能恢复。
+
 ### 固件版本对照表
 
 | FWVER | 判定 |
@@ -137,6 +183,7 @@ hp1020-print --status              # 打印机状态
 hp1020-print --firmware            # 只推固件
 hp1020-print --pages 文档.pdf      # 查看哪些页有内容
 hp1020-print --check               # 检查依赖
+hp1020-print --inspect             # 检查固件文件格式
 ```
 
 `--pages` 用 Ghostscript 的 bbox 判断每页着墨范围，能正确识别空白页 —— 扫描件常见的"最后一页纯白"会被自动跳过。

@@ -21,11 +21,15 @@ GS="$DIR/vendor/gs-static"
 if [ ! -x "$GS" ]; then
     echo "==> 未找到 vendor/gs-static"
     echo "    需要先获取静态编译的 Ghostscript（见 vendor/README.md）"
-    if [ -x /usr/local/bin/gs ]; then
-        echo "    检测到系统已有 /usr/local/bin/gs，将使用它"
-        GS="/usr/local/bin/gs"
+    found=""
+    for c in "$BIN/gs-static" /usr/local/bin/gs /opt/homebrew/bin/gs /usr/bin/gs; do
+        if [ -x "$c" ]; then found="$c"; break; fi
+    done
+    if [ -n "$found" ]; then
+        echo "    复用本机已有的 $found"
+        GS="$found"
     else
-        die "缺少 Ghostscript。请按 vendor/README.md 放置 vendor/gs-static"
+        die "缺少 Ghostscript。请先运行 ./fetch-vendor.sh，或按 vendor/README.md 自行编译"
     fi
 fi
 echo "==> Ghostscript: $("$GS" --version 2>/dev/null || echo '版本未知')"
@@ -48,9 +52,20 @@ sudo install -d -m 755 "$PREFIX/bin" "$PREFIX/fw" "$PREFIX/scripts"
 sudo install -m 755 "$DIR/bin/hp1020_usb" "$PREFIX/bin/hp1020_usb"
 sudo install -m 644 "$DIR/fw/sihp1020.dl"  "$PREFIX/fw/sihp1020.dl"
 sudo install -m 755 "$DIR/scripts/hp1020-print" "$PREFIX/scripts/hp1020-print"
+sudo install -m 755 "$DIR/scripts/hp1020-fwinspect" "$PREFIX/scripts/hp1020-fwinspect"
+
+# 固件检测器的便捷入口
+sudo tee "$BIN/hp1020-fwinspect" >/dev/null <<EOF
+#!/bin/sh
+exec "$PREFIX/scripts/hp1020-fwinspect" "\$@"
+EOF
+sudo chmod 755 "$BIN/hp1020-fwinspect"
 
 # Ghostscript 与 foo2zjs 装到系统路径（供脚本默认查找）
-sudo install -m 755 "$GS" "$BIN/gs-static"
+# 源与目标相同时跳过，避免 install 报 "same file"
+if [ "$(cd "$(dirname "$GS")" && pwd)/$(basename "$GS")" != "$BIN/gs-static" ]; then
+    sudo install -m 755 "$GS" "$BIN/gs-static"
+fi
 if [ "$FZ" != "$FILTER/foo2zjs" ]; then
     sudo install -d -m 755 "$FILTER"
     sudo install -m 755 "$FZ" "$FILTER/foo2zjs"
@@ -78,5 +93,7 @@ echo
 echo "用法:"
 echo "  hp1020-print 文件.pdf        打印（自动跳过空白页）"
 echo "  hp1020-print --status        查看状态"
+echo "  hp1020-print --inspect       检查固件格式"
+echo "  hp1020-fwinspect 文件        单独检查任意固件文件"
 echo
 echo "首次使用前请确认打印机已接电开机并连上 USB。"

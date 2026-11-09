@@ -83,6 +83,51 @@ Do one of these instead:
 - Or fetch HP's raw image with `foo2zjs`'s `getweb`, then run `arm2hpdl` on *that*
 - **Never hand-wrap a bare ELF**
 
+### Inspect a firmware file
+
+Don't judge by eye — the repo ships a format checker:
+
+```bash
+./scripts/hp1020-fwinspect fw/sihp1020.dl
+```
+
+```
+  文件:   fw/sihp1020.dl
+  大小:   128999 字节
+  md5:    0cd1ac3a4f6cb7995e99deffff840927
+  格式:   ACL/PJL
+  FWVER:  20080822
+  ELF:    ELF32 BE ARM(HP custom) EXEC @ offset 50
+  判定:   ✓ GOOD
+```
+
+Scan a directory:
+
+```bash
+./scripts/hp1020-fwinspect --all ~/Downloads
+```
+
+Machine-readable:
+
+```bash
+./scripts/hp1020-fwinspect --json fw/sihp1020.dl
+```
+
+Exit codes: `0` good / `1` wrong format / `2` missing file.
+
+Recognized formats:
+
+| Marker | Meaning | Usable |
+|---|---|---|
+| `ACL/PJL` | wrapped with `@PJL ENTER LANGUAGE=ACL` | depends on build |
+| `BARE_ELF` | raw ELF, no envelope | ✗ |
+| `DATE+ELF` | date string then ELF (Apple's `.acl`) | ✗ |
+| `BEEF` | `arm2hpdl` beef header | ✗ |
+| `HP_RAW_IMAGE` | HP raw image, needs `arm2hpdl` | → |
+| `ARM2HPDL_WRAPPED` | intermediate `arm2hpdl` wrapper | ✗ |
+
+`hp1020-print` runs this check before pushing firmware and **refuses to send a wrong format** — a bad push can wedge the printer's USB controller and require a power cycle to recover.
+
 ### Version reference
 
 | FWVER | Verdict |
@@ -106,6 +151,7 @@ hp1020-print --status              # printer state
 hp1020-print --firmware            # push firmware only
 hp1020-print --pages document.pdf  # show which pages have content
 hp1020-print --check               # verify dependencies
+hp1020-print --inspect             # inspect firmware file format
 ```
 
 `--pages` uses Ghostscript's bbox to detect ink extents, so trailing blank pages in scanned documents get skipped automatically.
