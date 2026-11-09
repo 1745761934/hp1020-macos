@@ -194,7 +194,7 @@ jobs:
         run: |
           set -euo pipefail
           for t in build universal check vendor install test clean help; do
-            grep -qE "^$$t:" Makefile || { echo "FAIL: 缺少目标 $$t"; exit 1; }
+            grep -qE "^$t:" Makefile || { echo "FAIL: 缺少目标 $t"; exit 1; }
           done
           echo "PASS: Makefile 目标齐全"
           make help
