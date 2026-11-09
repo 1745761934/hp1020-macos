@@ -4,6 +4,8 @@
 
 针对 Apple Silicon（M1/M2/M3/M4）与 Intel Mac 均可，macOS 12 及以上验证。
 
+> [English](README_EN.md)
+
 ```
 PDF ──► Ghostscript ──► pbmraw ──► foo2zjs ──► ZJS ──► USB ──► 打印机
 ```
