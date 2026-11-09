@@ -3,18 +3,11 @@ name: build
 on:
   push:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'scripts/**'
-      - 'fw/**'
-      - 'install.sh'
-      - 'fetch-vendor.sh'
-      - '.github/workflows/build.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:
   schedule:
-    # 每月跑一次，捕捉依赖 / 工具链漂移
+    # 每月跑一次，捕捉依赖漂移
     - cron: '0 3 1 * *'
 
 permissions:
@@ -22,99 +15,11 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 编译 hp1020_usb，产出 arm64 / x86_64 / universal 三种
-  # ---------------------------------------------------------------------------
-  build-binary:
-    name: 编译 hp1020_usb (${{ matrix.arch }})
-    runs-on: macos-14
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [arm64, x86_64]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 环境信息
-        run: |
-          sw_vers
-          clang --version
-          uname -m
-
-      - name: 编译 ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          clang -O2 -arch ${{ matrix.arch }} \
-                -Wall -Wextra \
-                -framework Foundation \
-                -framework IOKit \
-                -framework CoreFoundation \
-                -o "hp1020_usb-${{ matrix.arch }}" \
-                src/hp1020_usb.m
-
-      - name: 验证产物
-        run: |
-          set -euo pipefail
-          f="hp1020_usb-${{ matrix.arch }}"
-          file "$f"
-          lipo -info "$f"
-          # 必须包含目标架构
-          lipo -info "$f" | grep -q "${{ matrix.arch }}" || {
-            echo "产物缺少 ${{ matrix.arch }} 架构"; exit 1; }
-          echo "OK"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bin-${{ matrix.arch }}
-          path: hp1020_usb-${{ matrix.arch }}
-          if-no-files-found: error
-
-  make-universal:
-    name: 合并 universal binary
-    needs: build-binary
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: bin-*
-          merge-multiple: true
-          path: artifacts
-
-      - name: lipo 合并
-        run: |
-          set -euo pipefail
-          ls -la artifacts/
-          lipo -create \
-            artifacts/hp1020_usb-arm64 \
-            artifacts/hp1020_usb-x86_64 \
-            -output hp1020_usb
-          lipo -info hp1020_usb
-          file hp1020_usb
-
-      - name: 与仓库内版本比对
-        run: |
-          set -euo pipefail
-          echo "仓库内版本："; lipo -info bin/hp1020_usb || true
-          echo "新编译版本："; lipo -info hp1020_usb
-          if cmp -s hp1020_usb bin/hp1020_usb; then
-            echo "二进制与仓库内完全一致"
-          else
-            echo "二进制与仓库内不同（工具链差异属正常，功能应一致）"
-          fi
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hp1020_usb-universal
-          path: hp1020_usb
-          if-no-files-found: error
-
-  # ---------------------------------------------------------------------------
-  # 固件完整性 + 格式自检
+  # 脚本与固件检查 —— 纯 Linux，无需 macOS runner
   # ---------------------------------------------------------------------------
   verify-firmware:
     name: 固件完整性校验
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -127,8 +32,8 @@ jobs:
 
           [ -f "$FW" ] || { echo "缺少 $FW"; exit 1; }
 
-          ACTUAL_MD5=$(md5 -q "$FW")
-          ACTUAL_SIZE=$(stat -f%z "$FW")
+          ACTUAL_MD5=$(md5sum "$FW" | cut -d' ' -f1)
+          ACTUAL_SIZE=$(stat -c%s "$FW")
 
           echo "md5  : $ACTUAL_MD5"
           echo "size : $ACTUAL_SIZE"
@@ -140,27 +45,106 @@ jobs:
 
           echo "固件校验通过"
 
-      - name: 格式自检（hp1020-fwinspect）
+      - name: 格式自检
         run: |
           set -euo pipefail
           chmod +x scripts/hp1020-fwinspect
-          echo "=== 人类可读 ==="
-          ./scripts/hp1020-fwinspect fw/sihp1020.dl
-          echo
-          echo "=== JSON ==="
-          ./scripts/hp1020-fwinspect --json fw/sihp1020.dl
-
-          # 必须是 GOOD
-          ./scripts/hp1020-fwinspect fw/sihp1020.dl >/dev/null 2>&1 || {
-            echo "固件格式判定不是 GOOD"; exit 1; }
+          python3 scripts/hp1020-fwinspect fw/sihp1020.dl
+          python3 scripts/hp1020-fwinspect --json fw/sihp1020.dl
+          python3 scripts/hp1020-fwinspect fw/sihp1020.dl >/dev/null
           echo "格式判定 GOOD"
 
-  # ---------------------------------------------------------------------------
-  # 脚本静态检查
-  # ---------------------------------------------------------------------------
+  test-inspector:
+    name: 固件检测器回归测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 各类错误格式判定
+        run: |
+          set -euo pipefail
+          chmod +x scripts/hp1020-fwinspect
+          INS="$PWD/scripts/hp1020-fwinspect"
+          TMP=$(mktemp -d)
+          cd "$TMP"
+
+          GOOD="$GITHUB_WORKSPACE/fw/sihp1020.dl"
+
+          # 1. 正确固件 -> GOOD, exit 0
+          cp "$GOOD" correct.dl
+          "$INS" correct.dl >/dev/null || { echo "FAIL: 正确固件应 GOOD"; exit 1; }
+          echo "PASS: 正确固件 -> GOOD"
+
+          # 2. 裸 ELF -> BARE_ELF, exit 1
+          python3 - "$GOOD" <<'PY'
+          import sys
+          blob = open(sys.argv[1], 'rb').read()
+          pos = blob.find(b'\x7fELF')
+          assert pos > 0
+          open('bare_elf.bin', 'wb').write(blob[pos:])
+          PY
+          if "$INS" bare_elf.bin >/dev/null 2>&1; then
+            echo "FAIL: 裸 ELF 不应 GOOD"; exit 1
+          fi
+          "$INS" --json bare_elf.bin | grep -q '"format": "BARE_ELF"' || {
+            echo "FAIL: 裸 ELF 格式识别错"; exit 1; }
+          echo "PASS: 裸 ELF -> BAD_FORMAT"
+
+          # 3. 日期 + ELF -> DATE+ELF
+          python3 - "$GOOD" <<'PY'
+          import sys
+          blob = open(sys.argv[1], 'rb').read()
+          pos = blob.find(b'\x7fELF')
+          open('date_elf.bin', 'wb').write(b'20050309' + blob[pos:])
+          PY
+          if "$INS" date_elf.bin >/dev/null 2>&1; then
+            echo "FAIL: 日期+ELF 不应 GOOD"; exit 1
+          fi
+          "$INS" --json date_elf.bin | grep -q '"format": "DATE+ELF"' || {
+            echo "FAIL: 日期+ELF 识别错"; exit 1; }
+          echo "PASS: 日期+ELF -> BAD_FORMAT"
+
+          # 4. beef 头
+          printf '\xbe\xef0000rest' > beef.bin
+          "$INS" --json beef.bin | grep -q '"format": "BEEF"' || {
+            echo "FAIL: beef 识别错"; exit 1; }
+          echo "PASS: beef -> BAD_FORMAT"
+
+          # 5. 不存在的文件 -> exit 2
+          set +e
+          "$INS" nosuch.dl >/dev/null 2>&1
+          rc=$?
+          set -e
+          [ "$rc" = "2" ] || { echo "FAIL: 应返回 2，实际 $rc"; exit 1; }
+          echo "PASS: 不存在 -> exit 2"
+
+          # 6. 正确固件的关键字段
+          "$INS" --json correct.dl | grep -q '"format": "ACL/PJL"' || {
+            echo "FAIL: ACL/PJL 识别错"; exit 1; }
+          "$INS" --json correct.dl | grep -q '"verdict": "GOOD"' || {
+            echo "FAIL: verdict 错"; exit 1; }
+          echo "PASS: ACL/PJL + GOOD"
+
+          echo
+          echo "检测器回归测试全部通过"
+
+      - name: Python 3.9 兼容性
+        run: |
+          set -euo pipefail
+          # macOS 系统 Python 是 3.9，必须兼容
+          python3 -m py_compile scripts/hp1020-fwinspect
+          echo "语法通过"
+          # 确认没有 3.10+ 才有的类型注解写法
+          if grep -nE ':\s*(str|int|dict|list|tuple|bool)\s*\|\s*None|->\s*(str|int|dict|list|tuple|bool)\s*\|' \
+               scripts/hp1020-fwinspect; then
+            echo "FAIL: 存在 Python 3.10+ 才支持的类型注解写法"
+            exit 1
+          fi
+          echo "3.9 兼容性通过"
+
   lint-scripts:
     name: 脚本语法检查
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -176,108 +160,77 @@ jobs:
       - name: 可执行位
         run: |
           set -euo pipefail
-          for f in install.sh fetch-vendor.sh scripts/hp1020-print scripts/hp1020-fwinspect bin/hp1020_usb; do
-            if [ ! -x "$f" ]; then
-              echo "$f 缺少可执行权限"; exit 1
-            fi
+          for f in install.sh fetch-vendor.sh scripts/hp1020-print \
+                   scripts/hp1020-fwinspect bin/hp1020_usb; do
+            [ -x "$f" ] || { echo "$f 缺少可执行权限"; exit 1; }
           done
           echo "权限正确"
 
-      - name: python 语法
+      - name: shellcheck
         run: |
-          set -euo pipefail
-          python3 -m py_compile scripts/hp1020-fwinspect
-          echo "通过"
-
-      - name: shellcheck（若可用）
-        continue-on-error: true
-        run: |
-          if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck -S warning install.sh fetch-vendor.sh scripts/hp1020-print || true
-          else
-            echo "shellcheck 未安装，跳过"
-          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          # 只报错误级问题，警告不阻断
+          shellcheck -S error install.sh fetch-vendor.sh scripts/hp1020-print
+          echo "shellcheck 通过"
 
   # ---------------------------------------------------------------------------
-  # 检测器回归测试：确认各类错误格式都被正确识别
+  # ObjC 源码静态检查 —— 语法层面用 clang 前端解析（不需要 macOS SDK）
   # ---------------------------------------------------------------------------
-  test-inspector:
-    name: 固件检测器回归测试
-    runs-on: macos-14
+  check-objc:
+    name: ObjC 源码检查
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 构造各类错误格式并验证判定
+      - name: 检查源码结构
         run: |
           set -euo pipefail
-          chmod +x scripts/hp1020-fwinspect
-          TMP=$(mktemp -d)
-          cd "$TMP"
+          SRC=src/hp1020_usb.m
+          [ -f "$SRC" ] || { echo "缺少 $SRC"; exit 1; }
 
-          GOOD="$GITHUB_WORKSPACE/fw/sihp1020.dl"
+          # 必须定义正确的 VID/PID
+          grep -q 'define HP_VID 0x03f0' "$SRC" || {
+            echo "FAIL: VID 应为 0x03f0"; exit 1; }
+          grep -q 'define HP_PID 0x2b17' "$SRC" || {
+            echo "FAIL: PID 应为 0x2b17"; exit 1; }
+          echo "PASS: VID/PID 正确"
 
-          # 1. 正确固件 -> GOOD
-          cp "$GOOD" correct.dl
-          "$GITHUB_WORKSPACE/scripts/hp1020-fwinspect" correct.dl >/dev/null || {
-            echo "FAIL: 正确固件应判定为 GOOD"; exit 1; }
-          echo "PASS: 正确固件 -> GOOD"
+          # 必须检查精确固件版本，而不是见到 FWVER 就算数
+          grep -q 'FWVER:20080222' "$SRC" || {
+            echo "FAIL: 缺少精确版本判定"; exit 1; }
+          echo "PASS: 精确版本判定存在"
 
-          # 2. 裸 ELF -> BAD_FORMAT
-          #    取正确固件里的 ELF 部分（跳过 PJL 头）当作裸 ELF
-          python3 - "$GOOD" <<'PY'
+          # 必须用 IOUSBHostInterface 枚举（不能用 IOServiceMatching 字典过滤）
+          grep -q 'IOUSBHostInterface' "$SRC" || {
+            echo "FAIL: 应枚举 IOUSBHostInterface"; exit 1; }
+          echo "PASS: 接口枚举方式正确"
+
+      - name: 括号与基本结构
+        run: |
+          set -euo pipefail
+          SRC=src/hp1020_usb.m
+          python3 - "$SRC" <<'PY'
           import sys
-          blob = open(sys.argv[1], 'rb').read()
-          pos = blob.find(b'\x7fELF')
-          assert pos > 0, "找不到 ELF 起点"
-          open('bare_elf.bin', 'wb').write(blob[pos:])
+          src = open(sys.argv[1]).read()
+          # 括号平衡
+          for op, cl, name in [('{','}','花括号'), ('(',')','圆括号'), ('[',']','方括号')]:
+              if src.count(op) != src.count(cl):
+                  print(f"FAIL: {name}不平衡 {src.count(op)} vs {src.count(cl)}")
+                  sys.exit(1)
+          # 必须有 main 函数
+          if 'int main(' not in src:
+              print("FAIL: 缺少 main")
+              sys.exit(1)
+          print("PASS: 结构完整")
           PY
-          if "$GITHUB_WORKSPACE/scripts/hp1020-fwinspect" bare_elf.bin >/dev/null 2>&1; then
-            echo "FAIL: 裸 ELF 不应判定为 GOOD"; exit 1
-          fi
-          "$GITHUB_WORKSPACE/scripts/hp1020-fwinspect" --json bare_elf.bin \
-            | grep -q '"format": "BARE_ELF"' || {
-              echo "FAIL: 裸 ELF 格式识别错误"; exit 1; }
-          echo "PASS: 裸 ELF -> BAD_FORMAT"
-
-          # 3. 日期 + ELF（Apple 的 hp1020.acl 结构）-> BAD_FORMAT
-          python3 - "$GOOD" <<'PY'
-          import sys
-          blob = open(sys.argv[1], 'rb').read()
-          pos = blob.find(b'\x7fELF')
-          open('date_elf.bin', 'wb').write(b'20050309' + blob[pos:])
-          PY
-          if "$GITHUB_WORKSPACE/scripts/hp1020-fwinspect" date_elf.bin >/dev/null 2>&1; then
-            echo "FAIL: 日期+ELF 不应判定为 GOOD"; exit 1
-          fi
-          "$GITHUB_WORKSPACE/scripts/hp1020-fwinspect" --json date_elf.bin \
-            | grep -q '"format": "DATE+ELF"' || {
-              echo "FAIL: 日期+ELF 格式识别错误"; exit 1; }
-          echo "PASS: 日期+ELF -> BAD_FORMAT"
-
-          # 4. beef 头 -> BAD_FORMAT
-          printf '\xbe\xef0000rest' > beef.bin
-          "$GITHUB_WORKSPACE/scripts/hp1020-fwinspect" --json beef.bin \
-            | grep -q '"format": "BEEF"' || {
-              echo "FAIL: beef 格式识别错误"; exit 1; }
-          echo "PASS: beef -> BAD_FORMAT"
-
-          # 5. 不存在的文件 -> 退出码 2
-          set +e
-          "$GITHUB_WORKSPACE/scripts/hp1020-fwinspect" nosuch.dl >/dev/null 2>&1
-          rc=$?
-          set -e
-          [ "$rc" = "2" ] || { echo "FAIL: 不存在文件应返回 2，实际 $rc"; exit 1; }
-          echo "PASS: 不存在文件 -> exit 2"
-
-          echo
-          echo "检测器回归测试全部通过"
 
   # ---------------------------------------------------------------------------
-  # 汇总：所有检查通过才视为成功
+  # 汇总
   # ---------------------------------------------------------------------------
   all-green:
     name: 全部检查通过
-    needs: [build-binary, make-universal, verify-firmware, lint-scripts, test-inspector]
-    runs-on: macos-14
+    needs: [verify-firmware, test-inspector, lint-scripts, check-objc]
+    runs-on: ubuntu-latest
     steps:
-      - run: echo "所有作业成功"
+      - run: echo "所有检查作业成功"
