@@ -1,5 +1,7 @@
 # HP LaserJet 1020 on macOS
 
+[![build](https://github.com/1745761934/hp1020-macos/actions/workflows/build.yml/badge.svg)](https://github.com/1745761934/hp1020-macos/actions/workflows/build.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 让 **HP LaserJet 1020 / 1020 Plus** 在 macOS 上正常打印。
 
 针对 Apple Silicon（M1/M2/M3/M4）与 Intel Mac 均可，macOS 12 及以上验证。

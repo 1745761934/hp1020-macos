@@ -1,5 +1,7 @@
 # HP LaserJet 1020 on macOS
 
+[![build](https://github.com/1745761934/hp1020-macos/actions/workflows/build.yml/badge.svg)](https://github.com/1745761934/hp1020-macos/actions/workflows/build.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Get the **HP LaserJet 1020 / 1020 Plus** printing on modern macOS — Apple Silicon and Intel.
 
 Verified on macOS 26 with an M-series Mac.
