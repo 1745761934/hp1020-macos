@@ -1,0 +1,152 @@
+#!/bin/bash
+# HP LaserJet 1020 — 唤醒并打印
+#
+# 1020 是"哑设备"：没有常驻固件。每次断电/拔插 USB 后，
+# 必须先推送 sihp1020.dl（ACL/PJL 格式，md5 0cd1ac3a...）才能打印。
+#
+# 用法:
+#   hp1020-print 文件.pdf              自动跳过空白页
+#   hp1020-print 文件.pdf 1            只打印第 1 页
+#   hp1020-print 文件.pdf 1-3          打印 1 到 3 页
+#   hp1020-print --status              查看打印机状态
+#   hp1020-print --firmware            只推固件
+#   hp1020-print --pages 文件.pdf      列出各页是否有内容
+#   hp1020-print --check               检查依赖是否齐全
+
+set -uo pipefail
+
+# 解析安装位置：优先环境变量，其次脚本所在目录的上一级，最后 /usr/local/share/hp1020
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${HP1020_HOME:-}" ]; then
+    DIR="$HP1020_HOME"
+elif [ -x "$SELF/../bin/hp1020_usb" ]; then
+    DIR="$(cd "$SELF/.." && pwd)"
+else
+    DIR="/usr/local/share/hp1020"
+fi
+
+USB="$DIR/bin/hp1020_usb"
+FW="$DIR/fw/sihp1020.dl"
+GS="/usr/local/bin/gs-static"
+FOO2ZJS="/usr/libexec/cups/filter/foo2zjs"
+FW_MD5="0cd1ac3a4f6cb7995e99deffff840927"
+FW_VER="20080222"
+
+die() { echo "错误: $*" >&2; exit 1; }
+
+check_deps() {
+    local ok=0
+    [ -x "$USB" ] && echo "  ok   $USB" || { echo "  缺失 $USB"; ok=1; }
+    [ -f "$FW" ]  && echo "  ok   $FW"  || { echo "  缺失 $FW"; ok=1; }
+    [ -x "$GS" ]  && echo "  ok   $GS"  || { echo "  缺失 $GS（运行 ./install.sh）"; ok=1; }
+    [ -x "$FOO2ZJS" ] && echo "  ok   $FOO2ZJS" || { echo "  缺失 $FOO2ZJS（运行 ./install.sh）"; ok=1; }
+    return $ok
+}
+
+# 固件是否真的跑起来了（只有 FWVER:20080222 才算）
+fw_loaded() {
+    out=$("$USB" --info 2>&1) || return 1
+    case "$out" in *"fwver_ok=yes"*) return 0;; esac
+    # 兼容旧版二进制：回退到字符串匹配
+    case "$out" in *"FWVER:$FW_VER"*) return 0;; esac
+    return 1
+}
+
+# 设备是否在 USB 总线上
+device_present() {
+    "$USB" --info >/dev/null 2>&1
+}
+
+ensure_firmware() {
+    if fw_loaded; then
+        echo "==> 固件已就绪 (FWVER:$FW_VER)"
+        return 0
+    fi
+    if ! device_present; then
+        die "USB 上找不到打印机 (03f0:2b17)。
+     请确认：1) 打印机已接电开机  2) 换一个 USB 口直连（不要经 Hub）
+     若 ioreg -p IOUSB | grep -i laserjet 也查不到，请给打印机断电 60 秒后重试"
+    fi
+    echo "==> 固件未加载，正在推送（约 10 秒）"
+    [ -f "$FW" ] || die "缺少固件 $FW"
+    actual=$(md5 -q "$FW" 2>/dev/null)
+    [ "$actual" = "$FW_MD5" ] || die "固件校验失败 md5=$actual，应为 $FW_MD5"
+    "$USB" "$FW" >/dev/null 2>&1 || die "固件推送失败"
+    sleep 2
+    fw_loaded || die "固件推送后仍无响应，请给打印机断电 60 秒后重试"
+    echo "==> 固件加载成功 (FWVER:$FW_VER)"
+}
+
+# 用 Ghostscript bbox 判断每页有无内容
+content_pages() {
+    "$GS" -q -dBATCH -dNOPAUSE -dSAFER -sDEVICE=bbox \
+          -dFirstPage=1 -dLastPage=9999 "$1" 2>&1 >/dev/null |
+    awk '
+        /%%HiResBoundingBox:/ {
+            n++
+            if (($3 - $1) > 1 && ($4 - $2) > 1) pages = (pages == "" ? n : pages "," n)
+        }
+        END { print (pages == "" ? "none" : pages) }
+    '
+}
+
+case "${1:-}" in
+    --status)
+        if out=$("$USB" --info 2>&1); then
+            echo "$out" | sed 's/^/  /'
+            if fw_loaded; then echo "  就绪，可以打印"
+            else echo "  在线，固件未加载（打印时会自动推）"; fi
+        else
+            echo "  打印机未连接"; exit 1
+        fi
+        exit 0 ;;
+    --firmware) ensure_firmware; exit 0 ;;
+    --check)    echo "依赖检查:"; check_deps; exit $? ;;
+    --pages)
+        [ -f "${2:-}" ] || die "用法: $0 --pages 文件.pdf"
+        cp=$(content_pages "$2")
+        [ "$cp" = "none" ] && echo "所有页均为空白" || echo "有内容的页: $cp"
+        exit 0 ;;
+    ""|-h|--help)
+        sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+FILE="$1"
+PAGES="${2:-}"
+[ -f "$FILE" ] || die "找不到文件: $FILE"
+
+check_deps >/dev/null || { echo "依赖不全，请先运行 install.sh 或检查:"; check_deps; exit 1; }
+
+ensure_firmware
+
+# 未指定页范围时自动挑选有内容的页
+if [ -z "$PAGES" ]; then
+    cp=$(content_pages "$FILE")
+    [ "$cp" = "none" ] && die "文档所有页均为空白"
+    echo "==> 有内容的页: $cp"
+    PAGES="$cp"
+fi
+
+echo "==> 生成打印数据"
+TMP=$(mktemp -t hp1020).zjs
+trap 'rm -f "$TMP"' EXIT
+
+GS_ARGS=(-q -dBATCH -dSAFER -dQUIET -dNOPAUSE -sDEVICE=pbmraw
+         -r1200x600 -sPAPERSIZE=a4 -sOutputFile=-)
+if [ "$PAGES" != "all" ]; then
+    FIRST="${PAGES%%,*}"; FIRST="${FIRST%%-*}"
+    LAST="${PAGES##*,}";  LAST="${LAST##*-}"
+    GS_ARGS+=(-dFirstPage="$FIRST" -dLastPage="$LAST")
+fi
+
+"$GS" "${GS_ARGS[@]}" "$FILE" 2>/dev/null | \
+    "$FOO2ZJS" -r1200x600 -p9 -P -z1 -L0 > "$TMP" 2>/dev/null
+rc=$?
+[ $rc -eq 0 ] || die "转换失败 (exit $rc)，文件可能是加密 PDF 或格式不支持"
+sz=$(stat -f%z "$TMP" 2>/dev/null || echo 0)
+[ "$sz" -gt 1000 ] || die "生成数据异常 (${sz} 字节)"
+echo "    $sz 字节"
+
+echo "==> 发送到打印机"
+"$USB" --send "$TMP" 2>&1 | grep -v '^Device ID' | sed 's/^/    /'
+echo "==> 完成"

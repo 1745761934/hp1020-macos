@@ -1,0 +1,14 @@
+# 第三方二进制，通过 Release 分发
+vendor/gs-static
+vendor/foo2zjs
+vendor/*.tmp
+
+# macOS
+.DS_Store
+._*
+
+# 临时文件
+*.zjs
+*.ras
+*.pbm
+log/
