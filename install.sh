@@ -50,7 +50,7 @@ sudo install -m 644 "$DIR/fw/sihp1020.dl"  "$PREFIX/fw/sihp1020.dl"
 sudo install -m 755 "$DIR/scripts/hp1020-print" "$PREFIX/scripts/hp1020-print"
 
 # Ghostscript 与 foo2zjs 装到系统路径（供脚本默认查找）
-sudo install -m 755 "$GS" "$BIN/gs-static" 2>/dev/null || sudo install -m 755 "$GS" "$BIN/gs-static"
+sudo install -m 755 "$GS" "$BIN/gs-static"
 if [ "$FZ" != "$FILTER/foo2zjs" ]; then
     sudo install -d -m 755 "$FILTER"
     sudo install -m 755 "$FZ" "$FILTER/foo2zjs"
