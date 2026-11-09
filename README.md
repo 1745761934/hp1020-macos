@@ -29,7 +29,7 @@ HP 官方的 macOS 驱动早已停止更新，Apple 的 HP Printer Drivers 包�
 ## 快速开始
 
 ```bash
-git clone https://github.com/<你的用户名>/hp1020-macos.git
+git clone https://github.com/1745761934/hp1020-macos.git
 cd hp1020-macos
 
 # 下载 vendor 二进制（Ghostscript + foo2zjs）
@@ -41,6 +41,17 @@ cd hp1020-macos
 # 打印
 hp1020-print 文档.pdf
 ```
+
+也可以用 make：
+
+```bash
+make vendor    # 获取依赖
+make check     # 本地自检
+make install   # 安装
+make test      # 检查固件格式
+```
+
+`make help` 查看全部目标。
 
 首次使用前确认打印机已接电、已连 USB。
 
@@ -292,15 +303,55 @@ IOUSBHostPort::disconnect: persistent enumeration failures
 
 ```
 hp1020-macos/
-├── bin/hp1020_usb          IOKit USB 工具（arm64 预编译）
-├── fw/sihp1020.dl          正确固件（128999 B，md5 0cd1ac3a...）
-├── src/hp1020_usb.m        源码
-├── scripts/hp1020-print    主脚本
-├── vendor/                 第三方二进制（不进 Git，走 Release）
-├── docs/                   补充文档
-├── install.sh              安装
-└── fetch-vendor.sh         下载 vendor 二进制
+├── bin/hp1020_usb            IOKit USB 工具（universal binary）
+├── fw/sihp1020.dl            正确固件（128999 B，md5 0cd1ac3a...）
+├── src/hp1020_usb.m          源码
+├── scripts/
+│   ├── hp1020-print          主脚本
+│   ├── hp1020-fwinspect      固件格式检测器
+│   └── selfcheck.sh          本地自检
+├── vendor/                   第三方二进制（不进 Git，走 Release）
+├── .github/workflows/        CI
+├── Makefile                  构建入口
+├── install.sh                安装
+└── fetch-vendor.sh           下载 vendor 二进制
 ```
+
+## 构建与测试
+
+```bash
+make build       # 编译当前架构
+make universal   # arm64 + x86_64 合并
+make check       # 全部检查（等价于 CI）
+make clean       # 清理
+```
+
+手工编译：
+
+```bash
+clang -O2 -Wall -Wextra \
+      -framework Foundation -framework IOKit -framework CoreFoundation \
+      -o bin/hp1020_usb src/hp1020_usb.m
+```
+
+### CI 覆盖范围
+
+GitHub Actions 在 **ubuntu-latest** 上运行，全部免费：
+
+| 检查 | 内容 |
+|---|---|
+| 固件完整性 | md5、大小、格式判定 |
+| 检测器回归 | 裸 ELF / 日期+ELF / beef / 不存在文件 |
+| Python 兼容性 | 保证 macOS 系统 Python 3.9 可用 |
+| 脚本语法 | bash -n、py_compile、shellcheck |
+| 可执行位 | 所有脚本与二进制 |
+| ObjC 源码 | VID/PID、精确 FWVER 判定、接口枚举方式、括号平衡 |
+| Makefile | 目标齐全性 |
+| 自检脚本 | `scripts/selfcheck.sh` |
+
+macOS 编译不在 CI 内 —— 本仓库的 macOS runner 会在派发阶段被账号配额取消，任务根本拿不到 runner。编译在本地 `make universal` 完成，产物已提交在 `bin/`。
+
+> 注：CI 不编译 C 代码，因此对 `src/hp1020_usb.m` 做的是**结构性检查**（关键常量、判定逻辑、枚举方式、括号平衡），而不是编译验证。改源码后请在本地跑 `make universal`。
 
 ---
 

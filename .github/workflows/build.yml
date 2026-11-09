@@ -176,7 +176,7 @@ jobs:
         run: |
           set -euo pipefail
           for f in install.sh fetch-vendor.sh scripts/hp1020-print \
-                   scripts/hp1020-fwinspect bin/hp1020_usb; do
+                   scripts/hp1020-fwinspect scripts/selfcheck.sh bin/hp1020_usb; do
             [ -x "$f" ] || { echo "$f 缺少可执行权限"; exit 1; }
           done
           echo "权限正确"
@@ -186,8 +186,23 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           # 只报错误级问题，警告不阻断
-          shellcheck -S error install.sh fetch-vendor.sh scripts/hp1020-print
+          shellcheck -S error install.sh fetch-vendor.sh \
+                     scripts/hp1020-print scripts/selfcheck.sh
           echo "shellcheck 通过"
+
+      - name: Makefile 目标完整性
+        run: |
+          set -euo pipefail
+          for t in build universal check vendor install test clean help; do
+            grep -qE "^$$t:" Makefile || { echo "FAIL: 缺少目标 $$t"; exit 1; }
+          done
+          echo "PASS: Makefile 目标齐全"
+          make help
+
+      - name: 本地自检脚本
+        run: |
+          # selfcheck 在 Linux 下应同样通过（不含编译步骤）
+          bash scripts/selfcheck.sh
 
   # ---------------------------------------------------------------------------
   # ObjC 源码静态检查 —— 语法层面用 clang 前端解析（不需要 macOS SDK）

@@ -38,6 +38,17 @@ cd hp1020-macos
 hp1020-print document.pdf
 ```
 
+Or via make:
+
+```bash
+make vendor    # fetch dependencies
+make check     # run local self-checks
+make install   # install
+make test      # inspect firmware format
+```
+
+`make help` lists every target.
+
 Make sure the printer is powered on and connected over USB first.
 
 ---
@@ -242,6 +253,42 @@ This project deliberately **bypasses the CUPS queue** and writes straight to USB
 Under CUPS, a filter racing firmware loading can wedge the USB channel (`device busy`), and the error gets buried in logs. Direct sending is far easier to reason about.
 
 ---
+
+## Build and test
+
+```bash
+make build       # compile for the current arch
+make universal   # arm64 + x86_64 fat binary
+make check       # full check suite (same as CI)
+make clean       # tidy up
+```
+
+Manual compile:
+
+```bash
+clang -O2 -Wall -Wextra \
+      -framework Foundation -framework IOKit -framework CoreFoundation \
+      -o bin/hp1020_usb src/hp1020_usb.m
+```
+
+### What CI covers
+
+GitHub Actions runs on **ubuntu-latest** (free tier):
+
+| Check | Content |
+|---|---|
+| Firmware integrity | md5, size, format verdict |
+| Inspector regression | bare ELF / date+ELF / beef / missing file |
+| Python compatibility | keeps macOS system Python 3.9 working |
+| Script syntax | bash -n, py_compile, shellcheck |
+| Exec bits | every script and binary |
+| ObjC source | VID/PID, exact FWVER match, interface enumeration, bracket balance |
+| Makefile | target completeness |
+| Self-check | `scripts/selfcheck.sh` |
+
+macOS compilation is **not** in CI — macOS runners on this account are cancelled at dispatch time and never receive a runner. Build locally with `make universal`; the artifact is committed under `bin/`.
+
+> CI does not compile the C code, so `src/hp1020_usb.m` gets **structural** checks (key constants, verdict logic, enumeration approach, bracket balance) rather than a build. After editing the source, run `make universal` locally.
 
 ## Credits
 

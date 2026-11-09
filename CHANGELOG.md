@@ -13,18 +13,24 @@
 - **`hp1020-print --inspect`** —— 在主脚本内查看固件格式
 - **固件推送前自检** —— `hp1020-print` 在推送前校验格式，格式不对直接拒绝
 - **`hp1020-fwinspect` 全局命令** —— 安装时一并部署
+- **`Makefile`** —— `build` / `universal` / `check` / `vendor` / `install` / `test` / `clean` / `help`
+- **`scripts/selfcheck.sh`** —— 本地完整自检，与 CI 等价
 
 ### GitHub Actions（`.github/workflows/build.yml`）
 
-- `build-binary` —— arm64 / x86_64 矩阵编译，开启 `-Wall -Wextra`
-- `make-universal` —— lipo 合并，并与仓库内二进制比对
+全部跑在 `ubuntu-latest`（免费额度）：
+
 - `verify-firmware` —— md5 + 大小 + 格式三重校验
-- `lint-scripts` —— bash/python 语法、可执行位、shellcheck
 - `test-inspector` —— 构造裸 ELF / 日期+ELF / beef / 不存在文件，验证判定与退出码
+- `lint-scripts` —— bash/python 语法、可执行位、shellcheck、Makefile 目标、selfcheck
+- `check-objc` —— 源码不变量（VID/PID、精确 FWVER、接口枚举、括号平衡）
 - 支持 push / PR / 手动触发 / 每月定时
+
+macOS 编译不在 CI 内：本仓库的 macOS runner 会在派发阶段被账号配额取消，任务拿不到 runner（`started_at == completed_at`，日志 blob 404）。已通过 probe workflow 确认 `ubuntu-latest` 正常、`macos-14` 必取消。编译改由本地 `make universal` 完成。
 
 ### 修复
 
+- CI 中 `hp1020-fwinspect --json` 对错误格式返回 1，在 `pipefail` 下会中断断言
 - `install.sh` 复用本机 Ghostscript 时找不到 `/usr/local/bin/gs-static`
 - `install.sh` 在源与目标相同时触发 `install: same file` 错误
 - `install.sh` 未部署固件检测器
