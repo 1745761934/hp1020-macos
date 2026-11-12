@@ -109,6 +109,15 @@ set -e
 [ "$rc" = "2" ] && pass "不存在文件 -> exit 2" || bad "不存在文件应返回 2，实际 $rc"
 
 echo
+echo "=== 6. 防重复打印不变量 ==="
+if python3 scripts/check_norepeat.py . > /tmp/norepeat.out 2>&1; then
+    sed 's/^/  /' /tmp/norepeat.out | grep -E 'ok|通过'
+else
+    sed 's/^/  /' /tmp/norepeat.out
+    fail=1
+fi
+
+echo
 if [ $fail -eq 0 ]; then
     echo "全部检查通过"
     exit 0

@@ -214,6 +214,56 @@ The shipped binary is universal (arm64 + x86_64).
 
 ---
 
+## Duplicate printing
+
+If a page comes out twice, or repeated script runs produce extra copies, there were three causes — all fixed.
+
+### 1. USB timeout triggered a full-chunk resend (root cause)
+
+The old code did `continue` on `kIOReturnTimeout`, resending the entire **16 KB chunk**.
+
+A timeout does **not** mean the data wasn't delivered — after a bulk OUT timeout the bytes are usually already in the printer's buffer. Resending them literally prints the content twice.
+
+Now a timeout aborts with exit code 2 and **never retries**:
+
+```
+USB write timed out at 43210 — aborting without retry
+  (retrying would duplicate content on the page)
+```
+
+Endpoint stalls (`kIOUSBPipeStalled`) still recover, but only continue from the **current offset** — no rewinding — and at most 3 times.
+
+### 2. The script didn't wait for the job to finish
+
+Sending 97 KB takes about a second, but rendering a page takes several. The old script exited immediately after the send; running it again right away while the printer was still busy caused extra output.
+
+It now waits until the device probes idle 3 times in a row — roughly 0.8 s becomes about 3 s.
+
+### 3. Repeated triggers had no mutual exclusion
+
+Double-clicks and duplicate invocations are now blocked by a job lock:
+
+```
+错误: 已有一个打印任务正在运行 (pid 64192)，本次不重复发送
+```
+
+The lock lives at `/tmp/hp1020-print.lock`, released when the process exits. A stale lock from a dead process is reclaimed automatically.
+
+### Verified
+
+Four triggers within one second, one actual send:
+
+```
+run 1: Print data sent (97283 bytes).   exit=0
+run 2: a print job is already running   exit=1
+run 3: a print job is already running   exit=1
+run 4: a print job is already running   exit=1
+```
+
+### If you already got duplicates
+
+The printer may still be holding the previous job. **Unplug the printer's power for 60 s**, which clears the buffer, then print again.
+
 ## Troubleshooting
 
 ### Printer totally silent, no motor sound

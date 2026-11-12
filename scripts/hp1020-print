@@ -134,6 +134,22 @@ FILE="$1"
 PAGES="${2:-}"
 [ -f "$FILE" ] || die "找不到文件: $FILE"
 
+# ---- 防重复打印：作业锁 ----
+# 同一次误操作（连按两次、脚本被重复调用）不应产生两个作业。
+LOCK="/tmp/hp1020-print.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+    holder=$(cat "$LOCK/pid" 2>/dev/null || echo "?")
+    if [ "$holder" != "?" ] && kill -0 "$holder" 2>/dev/null; then
+        die "已有一个打印任务正在运行 (pid $holder)，本次不重复发送"
+    fi
+    # 残留锁（持有进程已不在）
+    rm -rf "$LOCK" 2>/dev/null
+    mkdir "$LOCK" 2>/dev/null || die "无法获取作业锁"
+fi
+echo $$ > "$LOCK/pid"
+cleanup() { rm -f "$TMP" 2>/dev/null; rm -rf "$LOCK" 2>/dev/null; }
+trap cleanup EXIT INT TERM
+
 check_deps >/dev/null || { echo "依赖不全，请先运行 install.sh 或检查:"; check_deps; exit 1; }
 
 ensure_firmware
@@ -148,7 +164,6 @@ fi
 
 echo "==> 生成打印数据"
 TMP=$(mktemp -t hp1020).zjs
-trap 'rm -f "$TMP"' EXIT
 
 GS_ARGS=(-q -dBATCH -dSAFER -dQUIET -dNOPAUSE -sDEVICE=pbmraw
          -r1200x600 -sPAPERSIZE=a4 -sOutputFile=-)
@@ -168,4 +183,41 @@ echo "    $sz 字节"
 
 echo "==> 发送到打印机"
 "$USB" --send "$TMP" 2>&1 | grep -v '^Device ID' | sed 's/^/    /'
+send_rc=${PIPESTATUS[0]}
+if [ "$send_rc" -ne 0 ]; then
+    case "$send_rc" in
+        2) die "USB 写入超时，已中止且未重发。
+     重发会让打印机重复输出同一段内容，所以这里停住了。
+     如果纸面上有重复，请给打印机断电 60 秒后再打印一次。" ;;
+        *) die "发送失败 (exit $send_rc)，未重试。" ;;
+    esac
+fi
+# 等待打印机把数据真正处理完再退出。
+# 发送 97KB 只需 1 秒，但渲染一页要数秒。若脚本提前返回、
+# 用户又立刻再跑一次，打印机可能还在处理上一份，造成重复出纸。
+#
+# 判据：设备必须连续 IDLE_CONFIRM 次可读，才算真正空闲。
+# 单次探测会因为 USB 轮询间隙误报 idle，所以要求连续命中。
+IDLE_CONFIRM=3
+wait_for_idle() {
+    local limit="${1:-25}" waited=0 streak=0
+    while [ "$waited" -lt "$limit" ]; do
+        if "$USB" --info >/dev/null 2>&1; then
+            streak=$((streak + 1))
+            [ "$streak" -ge "$IDLE_CONFIRM" ] && return 0
+        else
+            streak=0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+echo "==> 等待打印机处理完成"
+if wait_for_idle 20; then
+    echo "    打印机已空闲"
+else
+    echo "    注意：打印机仍在处理，请等它出完纸再下次打印"
+fi
 echo "==> 完成"

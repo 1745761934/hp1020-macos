@@ -15,6 +15,7 @@
 #import <IOKit/IOCFPlugIn.h>
 #import <IOKit/usb/IOUSBLib.h>
 
+#define MAX_RETRIES 3
 #define HP_VID 0x03f0
 #define HP_PID 0x2b17
 
@@ -126,25 +127,46 @@ int main(int argc, char **argv) {
         size_t n; unsigned long total = 0;
         while ((n = fread(buf, 1, CHUNK, f)) > 0) {
             size_t off = 0;
+            int retries = 0;
             while (off < n) {
-                UInt32 sent = 0;
                 IOReturn w = (*itf)->WritePipeTO(itf, outEp,
                                 buf + off, (UInt32)(n - off), 30000, 30000);
                 if (w == kIOReturnSuccess) {
-                    sent = (UInt32)(n - off);
+                    off = n;                 // 整块已送出
+                    retries = 0;
                 } else if (w == kIOUSBPipeStalled) {
+                    // 端点停摆：清除后从当前位置继续，不会重复已发数据
                     (*itf)->ClearPipeStall(itf, outEp);
-                    continue;
+                    if (++retries > MAX_RETRIES) {
+                        fprintf(stderr, "USB pipe stalled repeatedly at %lu\n",
+                                total + off);
+                        free(buf); fclose(f);
+                        (*itf)->USBInterfaceClose(itf);
+                        (*itf)->Release(itf);
+                        return 1;
+                    }
+                    usleep(50000);
                 } else if (w == kIOReturnTimeout) {
-                    continue;
+                    // 关键：超时不等于没送到。USB bulk OUT 超时后，
+                    // 数据往往已经进入打印机缓冲。若在这里整块重发，
+                    // 打印机就会把同一段内容收两次 —— 这正是重复打印的成因。
+                    // 因此超时直接判为失败，绝不自动重发。
+                    fprintf(stderr,
+                            "USB write timed out at %lu — aborting without retry\n"
+                            "  (retrying would duplicate content on the page)\n",
+                            total + off);
+                    free(buf); fclose(f);
+                    (*itf)->USBInterfaceClose(itf);
+                    (*itf)->Release(itf);
+                    return 2;
                 } else {
-                    fprintf(stderr, "USB write error 0x%08x at %lu\n", (unsigned)w, total + off);
+                    fprintf(stderr, "USB write error 0x%08x at %lu\n",
+                            (unsigned)w, total + off);
                     free(buf); fclose(f);
                     (*itf)->USBInterfaceClose(itf);
                     (*itf)->Release(itf);
                     return 1;
                 }
-                off += sent;
             }
             total += n;
         }

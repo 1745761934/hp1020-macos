@@ -176,7 +176,8 @@ jobs:
         run: |
           set -euo pipefail
           for f in install.sh fetch-vendor.sh scripts/hp1020-print \
-                   scripts/hp1020-fwinspect scripts/selfcheck.sh bin/hp1020_usb; do
+                   scripts/hp1020-fwinspect scripts/selfcheck.sh \
+                   scripts/check_norepeat.py bin/hp1020_usb; do
             [ -x "$f" ] || { echo "$f 缺少可执行权限"; exit 1; }
           done
           echo "权限正确"
@@ -235,6 +236,11 @@ jobs:
           grep -q 'IOUSBHostInterface' "$SRC" || {
             echo "FAIL: 应枚举 IOUSBHostInterface"; exit 1; }
           echo "PASS: 接口枚举方式正确"
+
+      - name: 防重复打印不变量
+        run: |
+          chmod +x scripts/check_norepeat.py
+          python3 scripts/check_norepeat.py .
 
       - name: 括号与基本结构
         run: |
